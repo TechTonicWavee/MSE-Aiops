@@ -1,0 +1,83 @@
+name: MLOps monitoring and candidate pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    name: Test, evaluate, and retrain
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_eligible: ${{ steps.quality-gate.outputs.eligible }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Run monitoring and retraining workflow
+        run: python -m mlops_monitoring --output-dir artifacts
+
+      - name: Read quality-gate decision
+        id: quality-gate
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          gate = json.loads(Path("artifacts/reports/quality_gate_decision.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"eligible={str(gate['eligible_for_promotion']).lower()}\n")
+          print(f"Candidate eligible for promotion: {gate['eligible_for_promotion']}")
+          PY
+
+      - name: Upload monitoring evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitoring-run-evidence
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-candidate:
+    name: Publish eligible candidate artifact
+    needs: monitor
+    if: >-
+      needs.monitor.outputs.candidate_eligible == 'true' &&
+      github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download monitoring evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: monitoring-run-evidence
+          path: artifacts
+
+      - name: Publish candidate and decision
+        uses: actions/upload-artifact@v4
+        with:
+          name: eligible-model-candidate
+          path: |
+            artifacts/models/candidate.pkl
+            artifacts/reports/quality_gate_decision.json
+          if-no-files-found: error
+          retention-days: 90
